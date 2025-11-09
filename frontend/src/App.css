@@ -1,6 +1,6 @@
 .App {
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #1E1E1E;
 }
 
 .header {
@@ -61,10 +61,11 @@
 
 .main-content {
   max-width: 1400px;
-  margin: 0 auto;
+  margin: 0;
   padding: 2rem;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  padding-left: 2rem;
+  display: flex;
+  justify-content: flex-start;
   gap: 2rem;
 }
 
@@ -75,6 +76,7 @@
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+  width: 1200px;
 }
 
 .video-container {
@@ -548,4 +550,315 @@
     opacity: 1;
     transform: translateX(0);
   }
+}
+
+/* Right Side Container */
+.right-side-container {
+  position: fixed;
+  top: 2rem;
+  right: 2rem;
+  bottom: 2rem;
+  width: 480px;
+  background: #313131;
+  backdrop-filter: blur(10px);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  z-index: 900;
+  overflow: hidden;
+}
+
+.right-side-content {
+  padding: 2rem;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.right-side-content h3 {
+  margin: 0 0 1rem 0;
+  color: white;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.right-side-content p {
+  color: rgba(255, 255, 255, 0.8);
+  line-height: 1.6;
+}
+
+/* Bottom Left Box */
+.bottom-left-box {
+  position: fixed;
+  bottom: 2rem;
+  left: 2rem;
+  width: 1200px;
+  height: 120px;
+  background: #313131;
+  backdrop-filter: blur(10px);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  padding: 1rem;
+  z-index: 1000;
+  overflow: hidden;
+}
+
+.faces-grid-compact {
+  display: flex;
+  gap: 0.75rem;
+  overflow-x: hidden;
+  height: 100%;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.face-card-compact {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 60px;
+}
+
+.face-image-container-compact {
+  width: 60px;
+  height: 60px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #2a2a2a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.face-image-container-compact:hover {
+  transform: scale(1.05);
+}
+
+.face-image-container-compact::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: #8000FF;
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+}
+
+.face-image-container-compact:hover::after {
+  opacity: 0.5;
+}
+
+.face-image-compact {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.face-placeholder-compact {
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.face-name-compact {
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-align: center;
+  max-width: 60px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty-state-compact {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: rgba(255, 255, 255, 0.5);
+  gap: 0.5rem;
+}
+
+.empty-state-compact p {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+/* Modal Popup */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.modal-content {
+  background: #2a2a2a;
+  border-radius: 16px;
+  width: 90%;
+  max-width: 400px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.5rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.modal-header h2 {
+  margin: 0;
+  color: white;
+  font-size: 1.5rem;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  padding: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  transition: all 0.2s;
+}
+
+.modal-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.modal-body {
+  padding: 2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.modal-face-preview {
+  display: flex;
+  justify-content: center;
+}
+
+.modal-face-image {
+  width: 150px;
+  height: 150px;
+  border-radius: 16px;
+  object-fit: cover;
+}
+
+.modal-face-placeholder {
+  width: 150px;
+  height: 150px;
+  border-radius: 16px;
+  background: #1a1a1a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.modal-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.modal-input-group label {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.modal-input {
+  background: #1a1a1a;
+  border: 2px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 0.75rem;
+  color: white;
+  font-size: 1rem;
+  transition: border-color 0.2s;
+}
+
+.modal-input:focus {
+  outline: none;
+  border-color: #8000FF;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 1rem;
+  padding: 1.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.modal-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.modal-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.modal-btn-delete {
+  background: #8000FF;
+  color: white;
+}
+
+.modal-btn-delete:hover:not(:disabled) {
+  background: #6600CC;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(128, 0, 255, 0.4);
+}
+
+.modal-btn-save {
+  background: #10b981;
+  color: white;
+}
+
+.modal-btn-save:hover:not(:disabled) {
+  background: #059669;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
 }

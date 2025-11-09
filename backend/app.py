@@ -27,6 +27,8 @@ class FaceRecognitionAPI:
         self.recognition_threshold = 10.0
         self.new_face_cooldown = {}
         self.cooldown_duration = 5
+        self.pending_faces = {}  # Track faces being analyzed
+        self.analysis_duration = 3.0  # Require 3 seconds of analysis
         
         # Create database directory if it doesn't exist
         if not os.path.exists(database_path):
@@ -139,22 +141,72 @@ class FaceRecognitionAPI:
                     recognized_name = name
             
             if min_distance < self.recognition_threshold and recognized_name:
+                # Clear pending face if it was being analyzed
+                if face_id in self.pending_faces:
+                    del self.pending_faces[face_id]
                 return recognized_name, min_distance, False
             else:
                 current_time = time.time()
                 
+                # Check if we're in cooldown period (just registered)
                 if face_id in self.new_face_cooldown:
                     last_capture_time = self.new_face_cooldown[face_id]
                     if current_time - last_capture_time < self.cooldown_duration:
                         return "Unknown (processing...)", min_distance, False
                 
-                new_name, new_embedding = self.register_new_face(face_img, face_id)
-                
-                if new_name:
-                    self.new_face_cooldown[face_id] = current_time
-                    return new_name, 0.0, True
+                # Track pending face for 3-second analysis
+                if face_id not in self.pending_faces:
+                    # First time seeing this unknown face
+                    self.pending_faces[face_id] = {
+                        'start_time': current_time,
+                        'embeddings': [embedding],
+                        'images': [face_img]
+                    }
+                    return "Analyzing...", min_distance, False
                 else:
-                    return "Unknown", min_distance, False
+                    # Face is being analyzed
+                    pending_data = self.pending_faces[face_id]
+                    time_elapsed = current_time - pending_data['start_time']
+                    
+                    # Add current embedding to the list
+                    pending_data['embeddings'].append(embedding)
+                    pending_data['images'].append(face_img)
+                    
+                    if time_elapsed >= self.analysis_duration:
+                        # 3 seconds passed, verify consistency and register
+                        embeddings_array = np.array(pending_data['embeddings'])
+                        
+                        # Check if embeddings are consistent (same person)
+                        avg_embedding = np.mean(embeddings_array, axis=0)
+                        max_variance = 0
+                        for emb in pending_data['embeddings']:
+                            variance = np.linalg.norm(np.array(emb) - avg_embedding)
+                            max_variance = max(max_variance, variance)
+                        
+                        # If variance is too high, reset (might be different people)
+                        if max_variance > 5.0:
+                            print(f"[ANALYSIS] High variance detected ({max_variance:.2f}), resetting analysis")
+                            del self.pending_faces[face_id]
+                            return "Analyzing... (unstable)", min_distance, False
+                        
+                        # Use the middle image for registration (most stable)
+                        middle_idx = len(pending_data['images']) // 2
+                        best_face_img = pending_data['images'][middle_idx]
+                        
+                        # Register the face
+                        new_name, new_embedding = self.register_new_face(best_face_img, face_id)
+                        
+                        if new_name:
+                            self.new_face_cooldown[face_id] = current_time
+                            del self.pending_faces[face_id]
+                            return new_name, 0.0, True
+                        else:
+                            del self.pending_faces[face_id]
+                            return "Unknown", min_distance, False
+                    else:
+                        # Still analyzing
+                        remaining = self.analysis_duration - time_elapsed
+                        return f"Analyzing... ({remaining:.1f}s)", min_distance, False
                 
         except Exception as e:
             print(f"Error in recognition: {e}")

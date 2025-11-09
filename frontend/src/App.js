@@ -12,6 +12,7 @@ function App() {
   const [transcriptions, setTranscriptions] = useState([]);
   const [isListening, setIsListening] = useState(false);
   const eventSourceRef = useRef(null);
+  const [selectedFace, setSelectedFace] = useState(null);
 
   const API_URL = 'http://localhost:5001';
 
@@ -153,27 +154,31 @@ function App() {
     setNewName('');
   };
 
+  const openFaceModal = (face) => {
+    setSelectedFace(face);
+    setNewName(face.name);
+  };
+
+  const closeFaceModal = () => {
+    setSelectedFace(null);
+    setNewName('');
+  };
+
+  const handleModalRename = async () => {
+    if (!newName.trim() || !selectedFace) return;
+    await handleRename(selectedFace.name);
+    closeFaceModal();
+  };
+
+  const handleModalDelete = async () => {
+    if (!selectedFace) return;
+    await handleDelete(selectedFace.name);
+    closeFaceModal();
+  };
+
 
   return (
     <div className="App">
-      <header className="header">
-        <div className="header-content">
-          <div className="header-title">
-            <Camera size={32} />
-            <h1>Face Recognition System</h1>
-          </div>
-          <div className="stats">
-            <div className="stat-item">
-              <Users size={20} />
-              <span>{stats.total_faces} Faces</span>
-            </div>
-            <div className="stat-item">
-              <span className="model-badge">{stats.model}</span>
-            </div>
-          </div>
-        </div>
-      </header>
-
       <main className="main-content">
         <div className="video-section">
           <div className="video-container">
@@ -189,133 +194,104 @@ function App() {
               </div>
             </div>
           </div>
-          
-          <div className="transcription-section">
-            <div className="transcription-header">
-              <h3>Live Transcription</h3>
-              <div className={`mic-status ${isListening ? 'active' : ''}`}>
-                <Mic size={20} />
-                <span>{isListening ? 'Listening...' : 'Starting...'}</span>
-              </div>
-            </div>
-            <div className="transcription-content">
-              {transcriptions.length === 0 ? (
-                <div className="transcription-empty">
-                  <Mic size={32} />
-                  <p>{isListening ? 'Listening... Speak now!' : 'Click Start to begin transcription'}</p>
-                </div>
-              ) : (
-                <>
-                  <div className="current-caption">
-                    <div className="caption-text">{transcriptions[0].text}</div>
-                  </div>
-                  {transcriptions.length > 1 && (
-                    <div className="previous-captions">
-                      {transcriptions.slice(1).map((item, index) => (
-                        <div key={index} className="previous-caption">
-                          {item.text}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="faces-section">
-          <div className="section-header">
-            <h2>
-              <Users size={24} />
-              Registered Faces ({faces.length})
-            </h2>
-            <button className="refresh-btn" onClick={fetchFaces}>
-              <RefreshCw size={18} />
-              Refresh
-            </button>
-          </div>
-
-          <div className="faces-grid">
-            {faces.length === 0 ? (
-              <div className="empty-state">
-                <Users size={48} />
-                <p>No faces registered yet</p>
-                <p className="empty-subtitle">Stand in front of the camera to register</p>
-              </div>
-            ) : (
-              faces.map((face) => (
-                <div key={face.name} className="face-card">
-                  <div className="face-image-container">
-                    {face.image ? (
-                      <img 
-                        src={`data:image/jpeg;base64,${face.image}`} 
-                        alt={face.name}
-                        className="face-image"
-                      />
-                    ) : (
-                      <div className="face-placeholder">
-                        <Users size={40} />
-                      </div>
-                    )}
-                  </div>
-                  
-                  <div className="face-info">
-                    {editingId === face.name ? (
-                      <div className="edit-form">
-                        <input
-                          type="text"
-                          value={newName}
-                          onChange={(e) => setNewName(e.target.value)}
-                          className="edit-input"
-                          placeholder="Enter new name"
-                          autoFocus
-                        />
-                        <div className="edit-actions">
-                          <button 
-                            className="btn-icon btn-success"
-                            onClick={() => handleRename(face.name)}
-                            disabled={loading}
-                          >
-                            <Check size={16} />
-                          </button>
-                          <button 
-                            className="btn-icon btn-cancel"
-                            onClick={cancelEdit}
-                            disabled={loading}
-                          >
-                            <X size={16} />
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        <h3 className="face-name">{face.name}</h3>
-                        <div className="face-actions">
-                          <button 
-                            className="btn-icon btn-edit"
-                            onClick={() => startEdit(face.name)}
-                            title="Rename"
-                          >
-                            <Edit2 size={16} />
-                          </button>
-                          <button 
-                            className="btn-icon btn-delete"
-                            onClick={() => handleDelete(face.name)}
-                            title="Delete"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
         </div>
       </main>
+      
+      <div className="right-side-container">
+        <div className="right-side-content">
+          <h3>Right Panel</h3>
+          <p>Content goes here</p>
+        </div>
+      </div>
+      
+      <div className="bottom-left-box">
+        <div className="faces-grid-compact">
+          {faces.length === 0 ? (
+            <div className="empty-state-compact">
+              <Users size={32} />
+              <p>No faces registered</p>
+            </div>
+          ) : (
+            faces.map((face) => (
+              <div key={face.name} className="face-card-compact">
+                <div className="face-image-container-compact" onClick={() => openFaceModal(face)}>
+                  {face.image ? (
+                    <img 
+                      src={`data:image/jpeg;base64,${face.image}`} 
+                      alt={face.name}
+                      className="face-image-compact"
+                    />
+                  ) : (
+                    <div className="face-placeholder-compact">
+                      <Users size={24} />
+                    </div>
+                  )}
+                </div>
+                <div className="face-name-compact">{face.name}</div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {selectedFace && (
+        <div className="modal-overlay" onClick={closeFaceModal}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Edit Face</h2>
+              <button className="modal-close" onClick={closeFaceModal}>
+                <X size={24} />
+              </button>
+            </div>
+            
+            <div className="modal-body">
+              <div className="modal-face-preview">
+                {selectedFace.image ? (
+                  <img 
+                    src={`data:image/jpeg;base64,${selectedFace.image}`} 
+                    alt={selectedFace.name}
+                    className="modal-face-image"
+                  />
+                ) : (
+                  <div className="modal-face-placeholder">
+                    <Users size={48} />
+                  </div>
+                )}
+              </div>
+              
+              <div className="modal-input-group">
+                <label>Name</label>
+                <input
+                  type="text"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  className="modal-input"
+                  placeholder="Enter name"
+                />
+              </div>
+            </div>
+            
+            <div className="modal-actions">
+              <button 
+                className="modal-btn modal-btn-delete"
+                onClick={handleModalDelete}
+                disabled={loading}
+              >
+                <Trash2 size={18} />
+                Delete
+              </button>
+              <button 
+                className="modal-btn modal-btn-save"
+                onClick={handleModalRename}
+                disabled={loading}
+              >
+                <Check size={18} />
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

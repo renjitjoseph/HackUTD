@@ -1,0 +1,17 @@
+# Facial Sentiment Analysis Application - Requirements
+# Python 3.8+
+
+# Core Dependencies
+opencv-python==4.8.1.78          # Computer vision library for video capture and image processing
+fer==22.5.1                       # Facial Expression Recognition library
+tensorflow==2.15.0                # Required by FER for emotion detection models
+keras==2.15.0                     # Deep learning framework (required by FER)
+moviepy==1.0.3                    # Video processing (compatible version for FER)
+
+# Additional Dependencies (installed automatically with above packages)
+numpy>=1.19.0                     # Numerical computing
+mtcnn>=0.1.1                      # Multi-task Cascaded Convolutional Networks for face detection
+
+# Optional: For GPU acceleration (uncomment if you have CUDA-enabled GPU)
+# tensorflow-gpu==2.15.0          # GPU-accelerated TensorFlow
+

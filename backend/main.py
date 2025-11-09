@@ -16,9 +16,9 @@ class UnifiedFaceSystem:
         self.encodings_file = encodings_file
         self.known_faces = {}
         self.model_name = "Facenet"
-        self.recognition_threshold = 10.0  # Distance threshold for recognition
+        self.recognition_threshold = 8.0  # Lowered to prevent false matches
         self.new_face_cooldown = {}  # Track when we last saw unknown faces
-        self.cooldown_duration = 5  # Seconds before capturing same unknown face again
+        self.cooldown_duration = 3  # Reduced from 5 to 3 seconds
         
         # Voice recognition setup
         self.recognizer = sr.Recognizer()
@@ -258,9 +258,14 @@ class UnifiedFaceSystem:
                     min_distance = distance
                     recognized_name = name
             
-            # Check if face is recognized
-            if min_distance < self.recognition_threshold and recognized_name:
-                return recognized_name, min_distance, False  # Known face
+            # Check if face is recognized (use higher threshold of 12.0 to prevent duplicate registrations)
+            if min_distance < 12.0 and recognized_name:
+                # If distance is less than 8.0, it's a confident match
+                if min_distance < self.recognition_threshold:
+                    return recognized_name, min_distance, False  # Known face
+                else:
+                    # Between 8.0 and 12.0 - likely the same person but don't register as new
+                    return f"{recognized_name} (?)", min_distance, False
             else:
                 # Unknown face - check cooldown before registering
                 current_time = time.time()
@@ -319,7 +324,7 @@ class UnifiedFaceSystem:
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         
         frame_count = 0
-        process_every_n_frames = 15  # Process every 15th frame for performance
+        process_every_n_frames = 5  # Reduced from 15 to 5 for more frequent processing
         last_recognition = {}
         
         while True:
@@ -328,13 +333,32 @@ class UnifiedFaceSystem:
                 print("Error: Failed to capture frame")
                 break
             
+            # Rotate frame 90 degrees counter-clockwise
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            
             frame_count += 1
             
             # Convert to grayscale for face detection
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             
-            # Detect faces
-            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+            # Detect faces with stricter parameters
+            faces = face_cascade.detectMultiScale(
+                gray, 
+                scaleFactor=1.1, 
+                minNeighbors=8,  # Higher value = more strict (fewer false positives)
+                minSize=(80, 80),  # Minimum face size in pixels
+                maxSize=(500, 500)  # Maximum face size to avoid detecting large objects
+            )
+            
+            # Filter faces by aspect ratio (faces should be roughly square)
+            valid_faces = []
+            for (x, y, w, h) in faces:
+                aspect_ratio = w / float(h)
+                # Face aspect ratio should be between 0.7 and 1.3 (roughly square)
+                if 0.7 <= aspect_ratio <= 1.3:
+                    valid_faces.append((x, y, w, h))
+            
+            faces = valid_faces
             
             # Process faces periodically
             if frame_count % process_every_n_frames == 0 and len(faces) > 0:
@@ -347,8 +371,15 @@ class UnifiedFaceSystem:
                     x2 = min(frame.shape[1], x + w + padding)
                     face_img = frame[y1:y2, x1:x2]
                     
-                    # Recognize or register face
-                    name, distance, is_new = self.recognize_or_register_face(face_img, i)
+                    # Verify it's actually a face using DeepFace
+                    try:
+                        # Quick face verification - if DeepFace can't detect a face, skip it
+                        DeepFace.extract_faces(face_img, detector_backend='opencv', enforce_detection=True)
+                        # Recognize or register face
+                        name, distance, is_new = self.recognize_or_register_face(face_img, i)
+                    except:
+                        # Not a valid face, skip this detection
+                        continue
                     
                     # Store result
                     last_recognition[i] = (name, distance, is_new)

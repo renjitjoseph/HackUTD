@@ -25,11 +25,11 @@ class FaceRecognitionAPI:
         self.encodings_file = encodings_file
         self.known_faces = {}
         self.model_name = "Facenet"
-        self.recognition_threshold = 10.0
+        self.recognition_threshold = 8.0  # Lowered to prevent false matches
         self.new_face_cooldown = {}
-        self.cooldown_duration = 5
+        self.cooldown_duration = 3  # Reduced from 5 to 3 seconds
         self.pending_faces = {}  # Track faces being analyzed
-        self.analysis_duration = 3.0  # Require 3 seconds of analysis
+        self.analysis_duration = 1.5  # Reduced from 3.0 to 1.5 seconds for faster registration
         
         # Create database directory if it doesn't exist
         if not os.path.exists(database_path):
@@ -44,7 +44,7 @@ class FaceRecognitionAPI:
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         self.last_recognition = {}
         self.frame_count = 0
-        self.process_every_n_frames = 15
+        self.process_every_n_frames = 5  # Reduced from 15 to 5 for more frequent processing
         
         # Emotion detection
         self.emotion_detector = FER(mtcnn=False)
@@ -57,6 +57,12 @@ class FaceRecognitionAPI:
             'fear': (128, 0, 128),
             'disgust': (0, 165, 255)
         }
+        
+        # Current detection data
+        self.current_person = None
+        self.current_confidence = 0.0
+        self.current_emotion = None
+        self.current_emotion_confidence = 0.0
         
         # Speech recognition
         self.recognizer = sr.Recognizer()
@@ -154,11 +160,18 @@ class FaceRecognitionAPI:
                     min_distance = distance
                     recognized_name = name
             
-            if min_distance < self.recognition_threshold and recognized_name:
+            # Check if face is recognized (use higher threshold of 12.0 to prevent duplicate registrations)
+            if min_distance < 12.0 and recognized_name:
                 # Clear pending face if it was being analyzed
                 if face_id in self.pending_faces:
                     del self.pending_faces[face_id]
-                return recognized_name, min_distance, False
+                
+                # If distance is less than 8.0, it's a confident match
+                if min_distance < self.recognition_threshold:
+                    return recognized_name, min_distance, False
+                else:
+                    # Between 8.0 and 12.0 - likely the same person but don't register as new
+                    return f"{recognized_name} (?)", min_distance, False
             else:
                 current_time = time.time()
                 
@@ -198,7 +211,7 @@ class FaceRecognitionAPI:
                             max_variance = max(max_variance, variance)
                         
                         # If variance is too high, reset (might be different people)
-                        if max_variance > 5.0:
+                        if max_variance > 8.0:  # Increased from 5.0 to 8.0 to be more lenient
                             print(f"[ANALYSIS] High variance detected ({max_variance:.2f}), resetting analysis")
                             del self.pending_faces[face_id]
                             return "Analyzing... (unstable)", min_distance, False
@@ -241,7 +254,25 @@ class FaceRecognitionAPI:
         self.frame_count += 1
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+        # Increased minNeighbors from 4 to 8 for more reliable detection
+        # Added minSize to filter out small false positives
+        faces = self.face_cascade.detectMultiScale(
+            gray, 
+            scaleFactor=1.1, 
+            minNeighbors=8,  # Higher value = more strict (fewer false positives)
+            minSize=(80, 80),  # Minimum face size in pixels
+            maxSize=(500, 500)  # Maximum face size to avoid detecting large objects
+        )
+        
+        # Filter faces by aspect ratio (faces should be roughly square)
+        valid_faces = []
+        for (x, y, w, h) in faces:
+            aspect_ratio = w / float(h)
+            # Face aspect ratio should be between 0.7 and 1.3 (roughly square)
+            if 0.7 <= aspect_ratio <= 1.3:
+                valid_faces.append((x, y, w, h))
+        
+        faces = valid_faces
         
         # Process faces periodically
         if self.frame_count % self.process_every_n_frames == 0 and len(faces) > 0:
@@ -253,13 +284,25 @@ class FaceRecognitionAPI:
                 x2 = min(frame.shape[1], x + w + padding)
                 face_img = frame[y1:y2, x1:x2]
                 
-                name, distance, is_new = self.recognize_or_register_face(face_img, i)
-                self.last_recognition[i] = (name, distance, is_new)
+                # Verify it's actually a face using DeepFace
+                try:
+                    # Quick face verification - if DeepFace can't detect a face, skip it
+                    DeepFace.extract_faces(face_img, detector_backend='opencv', enforce_detection=True)
+                    name, distance, is_new = self.recognize_or_register_face(face_img, i)
+                    self.last_recognition[i] = (name, distance, is_new)
+                except:
+                    # Not a valid face, skip this detection
+                    continue
         
         # Draw rectangles and labels
         for i, (x, y, w, h) in enumerate(faces):
             if i in self.last_recognition:
                 name, distance, is_new = self.last_recognition[i]
+                
+                # Update current person data (use first detected face)
+                if i == 0:
+                    self.current_person = name
+                    self.current_confidence = max(0, 100 - (distance * 10))  # Convert distance to confidence %
                 
                 if is_new:
                     color = (255, 165, 0)  # Orange
@@ -279,6 +322,11 @@ class FaceRecognitionAPI:
                 cv2.putText(frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             else:
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (128, 128, 128), 2)
+        
+        # Clear current person if no faces detected
+        if len(faces) == 0:
+            self.current_person = None
+            self.current_confidence = 0.0
         
         info_text = f"Known Faces: {len(self.known_faces)}"
         cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
@@ -312,7 +360,7 @@ class FaceRecognitionAPI:
                             emotions[emotion] /= total
             
             # Draw results
-            for face_data in result:
+            for idx, face_data in enumerate(result):
                 box = face_data['box']
                 x, y, w, h = box
                 emotions = face_data['emotions']
@@ -321,6 +369,11 @@ class FaceRecognitionAPI:
                 dominant_emotion = max(emotions.items(), key=lambda x: x[1])
                 emotion_name = dominant_emotion[0]
                 confidence = dominant_emotion[1]
+                
+                # Update current emotion data (use first detected face)
+                if idx == 0:
+                    self.current_emotion = emotion_name
+                    self.current_emotion_confidence = confidence * 100
                 
                 # Draw bounding box
                 color = self.emotion_colors.get(emotion_name, (255, 255, 255))
@@ -331,6 +384,11 @@ class FaceRecognitionAPI:
                 (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
                 cv2.rectangle(frame, (x, y - text_height - 10), (x + text_width + 10, y), color, -1)
                 cv2.putText(frame, label, (x + 5, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+            
+            # Clear current emotion if no faces detected
+            if len(result) == 0:
+                self.current_emotion = None
+                self.current_emotion_confidence = 0.0
         
         except Exception as e:
             print(f"Error in emotion detection: {e}")
@@ -560,6 +618,16 @@ def get_stats():
         'total_faces': len(face_system.known_faces),
         'model': face_system.model_name,
         'threshold': face_system.recognition_threshold
+    })
+
+@app.route('/api/current', methods=['GET'])
+def get_current():
+    """Get current detection data"""
+    return jsonify({
+        'person': face_system.current_person,
+        'confidence': round(face_system.current_confidence, 1) if face_system.current_confidence else 0,
+        'emotion': face_system.current_emotion,
+        'emotion_confidence': round(face_system.current_emotion_confidence, 1) if face_system.current_emotion_confidence else 0
     })
 
 @app.route('/api/speech/start', methods=['POST'])

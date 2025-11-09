@@ -13,6 +13,7 @@ function App() {
   const [isListening, setIsListening] = useState(false);
   const eventSourceRef = useRef(null);
   const [selectedFace, setSelectedFace] = useState(null);
+  const [currentData, setCurrentData] = useState({ person: null, confidence: 0, emotion: null, emotion_confidence: 0 });
 
   const API_URL = 'http://localhost:5001';
 
@@ -58,6 +59,7 @@ function App() {
   useEffect(() => {
     fetchFaces();
     fetchStats();
+    fetchCurrentData();
     
     // Auto-start speech recognition after a short delay
     const startTimer = setTimeout(() => {
@@ -67,7 +69,8 @@ function App() {
     const interval = setInterval(() => {
       fetchFaces();
       fetchStats();
-    }, 3000);
+      fetchCurrentData();
+    }, 500); // Update more frequently for real-time data
     
     return () => {
       clearTimeout(startTimer);
@@ -91,6 +94,15 @@ function App() {
       setStats(response.data);
     } catch (error) {
       console.error('Error fetching stats:', error);
+    }
+  };
+
+  const fetchCurrentData = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/current`);
+      setCurrentData(response.data);
+    } catch (error) {
+      console.error('Error fetching current data:', error);
     }
   };
 
@@ -215,8 +227,56 @@ function App() {
       
       <div className="right-side-container">
         <div className="right-side-content">
-          <h3>Right Panel</h3>
-          <p>Content goes here</p>
+          <h3>Current Detection</h3>
+          
+          {currentData.person ? (
+            <div className="detection-info">
+              <div className="detection-item">
+                <div className="detection-label">Person</div>
+                <div className="detection-value person-name">{currentData.person}</div>
+              </div>
+              
+              <div className="detection-item">
+                <div className="detection-label">Recognition Confidence</div>
+                <div className="detection-value">
+                  <div className="confidence-bar">
+                    <div 
+                      className="confidence-fill" 
+                      style={{ width: `${currentData.confidence}%` }}
+                    ></div>
+                  </div>
+                  <span className="confidence-text">{currentData.confidence.toFixed(1)}%</span>
+                </div>
+              </div>
+              
+              {currentData.emotion && (
+                <>
+                  <div className="detection-item">
+                    <div className="detection-label">Emotion</div>
+                    <div className="detection-value emotion-name">{currentData.emotion}</div>
+                  </div>
+                  
+                  <div className="detection-item">
+                    <div className="detection-label">Emotion Confidence</div>
+                    <div className="detection-value">
+                      <div className="confidence-bar">
+                        <div 
+                          className="confidence-fill emotion-fill" 
+                          style={{ width: `${currentData.emotion_confidence}%` }}
+                        ></div>
+                      </div>
+                      <span className="confidence-text">{currentData.emotion_confidence.toFixed(1)}%</span>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="no-detection">
+              <Users size={64} />
+              <p>No person detected</p>
+            </div>
+          )}
         </div>
       </div>
       

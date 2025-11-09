@@ -49,14 +49,15 @@ class HeadlessFacialSentiment:
         self.cap = None
         self.running = False
         self.capture_thread = None
-        
+        self.latest_frame = None  # Latest frame for sharing with face detection
+
         # Store emotion samples with timestamps
         # Each sample: {'timestamp': datetime, 'emotion': str, 'confidence': float, 'all_emotions': dict}
         self.emotion_samples = deque(maxlen=60)  # Keep last 60 samples (60 seconds at 1/sec)
-        
+
         # Lock for thread-safe access to emotion samples
         self.lock = threading.Lock()
-        
+
         # Error tracking
         self.last_error = None
         self.consecutive_failures = 0
@@ -104,7 +105,7 @@ class HeadlessFacialSentiment:
         while self.running:
             try:
                 ret, frame = self.cap.read()
-                
+
                 if not ret or frame is None:
                     self.consecutive_failures += 1
                     if self.consecutive_failures >= 10:
@@ -113,9 +114,12 @@ class HeadlessFacialSentiment:
                         break
                     time.sleep(0.1)
                     continue
-                
+
                 # Reset failure counter
                 self.consecutive_failures = 0
+
+                # Store latest frame for sharing with face detection
+                self.latest_frame = frame.copy()
                 
                 # Detect emotions
                 emotions_data = self.detector.detect_emotions(frame)

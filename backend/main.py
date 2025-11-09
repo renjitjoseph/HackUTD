@@ -9,9 +9,14 @@ import string
 import speech_recognition as sr
 import threading
 import re
+from supabase import create_client, Client
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 class UnifiedFaceSystem:
-    def __init__(self, database_path="face_database", encodings_file="face_encodings.pkl"):
+    def __init__(self, database_path="face_database", encodings_file="face_encodings.pkl", enable_supabase=True):
         self.database_path = database_path
         self.encodings_file = encodings_file
         self.known_faces = {}
@@ -19,7 +24,19 @@ class UnifiedFaceSystem:
         self.recognition_threshold = 8.0  # Lowered to prevent false matches
         self.new_face_cooldown = {}  # Track when we last saw unknown faces
         self.cooldown_duration = 3  # Reduced from 5 to 3 seconds
-        
+
+        # Supabase integration
+        self.supabase = None
+        if enable_supabase:
+            try:
+                supabase_url = os.getenv('SUPABASE_URL', 'https://xmyjprtuztwqqovonrzb.supabase.co')
+                supabase_key = os.getenv('SUPABASE_KEY', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhteWpwcnR1enR3cXFvdm9ucnpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI2NTY2NTQsImV4cCI6MjA3ODIzMjY1NH0.sC1hue1SeB5iJJypKKkVHcQ5Gup7ckKX-yP79tUN9Ek')
+                self.supabase = create_client(supabase_url, supabase_key)
+                print("✅ Supabase client initialized")
+            except Exception as e:
+                print(f"⚠️  Supabase initialization failed: {e}")
+                self.supabase = None
+
         # Voice recognition setup
         self.recognizer = sr.Recognizer()
         self.recognizer.energy_threshold = 300  # Lower threshold for better detection
@@ -28,12 +45,17 @@ class UnifiedFaceSystem:
         self.microphone = sr.Microphone(device_index=None)  # None = default, or try 0, 2, etc.
         self.listening = False
         self.last_heard_names = []  # Store recently detected names from conversation
-        
+
+        # Customer locking for active_session tracking
+        self.locked_customer_id = None
+        self.customer_lock_time = None
+        self.lock_duration = 5.0  # 5 seconds of stable detection before locking
+
         # Create database directory if it doesn't exist
         if not os.path.exists(database_path):
             os.makedirs(database_path)
             print(f"Created database directory: {database_path}")
-        
+
         # Load known faces
         self.load_encodings()
     
@@ -65,28 +87,42 @@ class UnifiedFaceSystem:
         try:
             # Generate random name
             name = self.generate_random_name()
-            
+
             print(f"\n[NEW FACE DETECTED] Registering as: {name}")
-            
+
             # Get face embedding
             embedding = DeepFace.represent(face_img, model_name=self.model_name, enforce_detection=False)[0]["embedding"]
-            
+
             # Save to database
             self.known_faces[name] = embedding
-            
+
             # Save encodings to file
             with open(self.encodings_file, 'wb') as f:
                 pickle.dump(self.known_faces, f)
-            
+
             # Save face image
             img_path = os.path.join(self.database_path, f"{name}.jpg")
             cv2.imwrite(img_path, face_img)
-            
+
+            # Upload to Supabase
+            if self.supabase:
+                try:
+                    self.supabase.table('customers').upsert({
+                        'customer_id': name,
+                        'name': name,
+                        'personal_details': [],
+                        'professional_details': [],
+                        'sales_context': []
+                    }).execute()
+                    print(f"  ✅ Uploaded to Supabase")
+                except Exception as e:
+                    print(f"  ⚠️  Supabase upload failed: {e}")
+
             print(f"✓ Successfully registered {name}")
             print(f"  Total faces in database: {len(self.known_faces)}")
-            
+
             return name, embedding
-            
+
         except Exception as e:
             print(f"Error registering new face: {e}")
             return None, None
@@ -290,6 +326,37 @@ class UnifiedFaceSystem:
             print(f"Error in recognition: {e}")
             return "Error", float('inf'), False
     
+    def update_active_session(self, customer_id=None, status='active'):
+        """Update active_session table in Supabase"""
+        if not self.supabase:
+            return
+
+        try:
+            if status == 'active' and customer_id:
+                # Lock customer
+                self.supabase.table('active_session').update({
+                    'status': 'active',
+                    'current_customer_id': customer_id,
+                    'confidence_level': 'stable'
+                }).eq('id', 1).execute()
+                print(f"\n✅ LOCKED CUSTOMER: {customer_id}")
+            elif status == 'active':
+                # Mark active but no customer yet
+                self.supabase.table('active_session').update({
+                    'status': 'active',
+                    'current_customer_id': None,
+                    'confidence_level': 'detecting'
+                }).eq('id', 1).execute()
+            elif status == 'idle':
+                # Clear session
+                self.supabase.table('active_session').update({
+                    'status': 'idle',
+                    'current_customer_id': None,
+                    'confidence_level': 'detecting'
+                }).eq('id', 1).execute()
+        except Exception as e:
+            print(f"⚠️  Failed to update active_session: {e}")
+
     def start_system(self):
         """Start the unified face recognition and registration system"""
         print("\n" + "="*60)
@@ -303,10 +370,14 @@ class UnifiedFaceSystem:
         print("  • Automatically capture and register new faces")
         print("  • Assign random names to new faces")
         print("  • Listen for names in conversation and update automatically")
+        print("  • Update active_session for mobile app integration")
         print("\nVoice Commands:")
         print("  'This is [Name]' or 'His/Her name is [Name]'")
         print("\nPress 'q' to quit\n")
-        
+
+        # Mark session as active
+        self.update_active_session(status='active')
+
         # Start voice recognition in background thread
         self.listening = True
         voice_thread = threading.Thread(target=self.listen_for_names, daemon=True)
@@ -383,13 +454,28 @@ class UnifiedFaceSystem:
                     
                     # Store result
                     last_recognition[i] = (name, distance, is_new)
-                    
+
+                    # Track customer locking (5 seconds of stable detection)
+                    clean_name = name.replace(" (?)", "")  # Remove uncertainty marker
+                    if distance < 12.0:  # Within recognition range
+                        if self.locked_customer_id != clean_name:
+                            # New customer detected or customer changed
+                            if self.customer_lock_time is None:
+                                self.customer_lock_time = time.time()
+                            elif time.time() - self.customer_lock_time >= self.lock_duration:
+                                # Lock achieved after 5 seconds
+                                self.locked_customer_id = clean_name
+                                self.update_active_session(customer_id=clean_name, status='active')
+                                self.customer_lock_time = None
+                        # else: Already locked to this customer, do nothing
+
                     # Print to terminal
                     if is_new:
                         print(f"\n[NEW] {name} registered!")
                     else:
                         status = "KNOWN" if distance < self.recognition_threshold else "UNKNOWN"
-                        print(f"\r[{status}] {name} (distance: {distance:.2f})    ", end='', flush=True)
+                        lock_status = f" [LOCKED]" if self.locked_customer_id == clean_name else ""
+                        print(f"\r[{status}] {name} (distance: {distance:.2f}){lock_status}    ", end='', flush=True)
             
             # Draw rectangles and labels on frame
             for i, (x, y, w, h) in enumerate(faces):
@@ -433,6 +519,7 @@ class UnifiedFaceSystem:
         
         # Cleanup
         self.listening = False  # Stop voice recognition
+        self.update_active_session(status='idle')  # Clear active session
         cap.release()
         cv2.destroyAllWindows()
         print(f"\nSystem stopped. Total faces in database: {len(self.known_faces)}")

@@ -12,6 +12,8 @@ from datetime import datetime
 import time
 import threading
 import pyttsx3
+from supabase import create_client, Client
+import json
 
 # Try to import facial sentiment (optional)
 try:
@@ -30,22 +32,42 @@ class SalesCallAnalyzer:
     """
     Real-time sales call analyzer that provides strategic insights.
     """
-    
-    def __init__(self, gemini_api_key: str, model_size: str = "base", 
-                 camera_index: int = 0, enable_facial: bool = True):
+
+    def __init__(self, gemini_api_key: str, model_size: str = "base",
+                 camera_index: int = 0, enable_facial: bool = True,
+                 supabase_url: str = None, supabase_key: str = None,
+                 customer_id: str = None):
         """
         Initialize the sales call analyzer.
-        
+
         Args:
             gemini_api_key: Your Google Gemini API key
             model_size: Whisper model size (tiny, base, small, medium, large)
             camera_index: Camera device index for facial analysis (default: 0)
             enable_facial: Enable facial sentiment analysis (default: True)
+            supabase_url: Supabase project URL (optional)
+            supabase_key: Supabase API key (optional)
+            customer_id: Customer identifier from face recognition (optional)
         """
         # Set API key in environment for genai.Client()
         os.environ["GEMINI_API_KEY"] = gemini_api_key
         self.client = genai.Client()
-        
+
+        # Initialize Supabase client (optional)
+        self.supabase = None
+        if supabase_url and supabase_key:
+            try:
+                self.supabase = create_client(supabase_url, supabase_key)
+                print("✅ Supabase client initialized")
+            except Exception as e:
+                print(f"⚠️  Supabase initialization failed: {e}")
+                self.supabase = None
+
+        # Store customer ID for linking conversations
+        self.customer_id = customer_id
+        if customer_id:
+            print(f"👤 Customer ID set: {customer_id}")
+
         # Initialize TTS engine
         self.tts_engine = pyttsx3.init()
         self.tts_engine.setProperty('rate', 175)  # Speed (default is 200)
@@ -276,11 +298,15 @@ Keep it brief and actionable."""
         """Stop the analysis."""
         self.listening = False
         self.transcriber.stop()
-        
+
         # Stop facial capture if enabled
         if self.facial_analyzer:
             self.facial_analyzer.stop()
-        
+
+        # Save conversation to Supabase if available
+        if self.supabase and len(self.insights) > 0:
+            self.save_conversation_to_supabase()
+
         # Show summary
         print("\n" + "📊"*35)
         print("CALL SUMMARY")
@@ -387,6 +413,198 @@ Be ULTRA-SPECIFIC. Use exact quotes from the call. Give concrete actions, not ge
         )
         return response.text
 
+    def extract_customer_profile(self, transcript: str) -> dict:
+        """
+        Extract structured customer profile from transcript using Gemini.
+
+        Args:
+            transcript: Full conversation transcript
+
+        Returns:
+            Dictionary with name, personal_details, professional_details, sales_context
+        """
+        try:
+            prompt = f"""You are a customer intelligence analyst. Extract key information from this sales call transcript and structure it into a clean customer profile.
+
+TRANSCRIPT:
+{transcript}
+
+Extract information and format as JSON with this EXACT structure:
+
+{{
+  "name": "Customer name if mentioned, or null",
+  "personal_details": [
+    "Single line bullet point about personal life",
+    "Another personal detail"
+  ],
+  "professional_details": [
+    "Single line bullet point about work/career",
+    "Another professional detail"
+  ],
+  "sales_context": [
+    "Current provider: [Provider name]",
+    "Pain point: [Specific issue]",
+    "Another sales-relevant detail"
+  ]
+}}
+
+RULES:
+1. Each bullet must be ONE LINE only - concise and specific
+2. Only include information EXPLICITLY mentioned in the transcript
+3. If a category has no information, use an empty array []
+4. Be specific - include exact details (provider names, dollar amounts, features mentioned)
+5. Focus on facts, not interpretations
+6. Format sales_context bullets as "Topic: Detail" for easy scanning
+7. Return ONLY valid JSON, no markdown formatting or explanation.
+
+JSON OUTPUT:"""
+
+            response = self.client.models.generate_content(
+                model="gemini-2.0-flash-exp",
+                contents=prompt
+            )
+
+            # Clean the response (remove markdown if present)
+            response_text = response.text.strip()
+            if response_text.startswith("```"):
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+                response_text = response_text.replace("```json", "").replace("```", "").strip()
+
+            profile = json.loads(response_text)
+            return profile
+
+        except Exception as e:
+            print(f"❌ Error extracting customer profile: {e}")
+            return {
+                "name": None,
+                "personal_details": [],
+                "professional_details": [],
+                "sales_context": []
+            }
+
+    def save_customer_profile(self, profile: dict):
+        """
+        Save or update customer profile in Supabase with merge logic.
+        New information is appended and reordered by recency (newest first).
+
+        Args:
+            profile: Extracted profile dictionary
+        """
+        if not self.supabase or not self.customer_id:
+            print("⚠️  Cannot save customer profile (missing Supabase or customer_id)")
+            return
+
+        try:
+            # Check if customer already exists
+            existing = self.supabase.table('customers').select('*').eq('customer_id', self.customer_id).execute()
+
+            if existing.data and len(existing.data) > 0:
+                # MERGE with existing profile
+                existing_profile = existing.data[0]
+
+                # Merge arrays: new items first (recency), then deduplicate
+                def merge_bullets(new_bullets, old_bullets):
+                    # Start with new bullets
+                    merged = list(new_bullets)
+                    # Add old bullets that aren't duplicates
+                    for old_bullet in old_bullets:
+                        if old_bullet not in merged:
+                            merged.append(old_bullet)
+                    return merged
+
+                merged_profile = {
+                    "customer_id": self.customer_id,
+                    "name": profile.get('name') or existing_profile.get('name'),
+                    "personal_details": merge_bullets(
+                        profile.get('personal_details', []),
+                        existing_profile.get('personal_details', [])
+                    ),
+                    "professional_details": merge_bullets(
+                        profile.get('professional_details', []),
+                        existing_profile.get('professional_details', [])
+                    ),
+                    "sales_context": merge_bullets(
+                        profile.get('sales_context', []),
+                        existing_profile.get('sales_context', [])
+                    )
+                }
+
+                # Update existing record
+                self.supabase.table('customers').update(merged_profile).eq('customer_id', self.customer_id).execute()
+                print(f"✅ Customer profile updated (merged with existing data)")
+
+            else:
+                # CREATE new profile
+                new_profile = {
+                    "customer_id": self.customer_id,
+                    "name": profile.get('name'),
+                    "personal_details": profile.get('personal_details', []),
+                    "professional_details": profile.get('professional_details', []),
+                    "sales_context": profile.get('sales_context', [])
+                }
+
+                self.supabase.table('customers').insert(new_profile).execute()
+                print(f"✅ New customer profile created")
+
+        except Exception as e:
+            print(f"❌ Error saving customer profile: {e}")
+
+    def save_conversation_to_supabase(self):
+        """
+        Save the complete conversation transcript and insights to Supabase.
+        Also extracts and saves/updates customer profile.
+        """
+        if not self.supabase:
+            print("⚠️  Supabase not configured, skipping save")
+            return
+
+        try:
+            # Compile full transcript
+            full_transcript = " ".join([i['transcript'] for i in self.insights])
+
+            # Prepare conversation data
+            conversation_data = {
+                "timestamp": datetime.now().isoformat(),
+                "duration_seconds": len(self.insights) * 10,
+                "full_transcript": full_transcript,
+                "insights_count": len(self.insights),
+                "facial_analysis_enabled": self.facial_enabled,
+                "customer_id": self.customer_id,  # Link to face recognition
+                "insights": [
+                    {
+                        "timestamp": insight['timestamp'].isoformat(),
+                        "transcript": insight['transcript'],
+                        "emotion_data": insight.get('emotion_data'),
+                        "insights": insight['insights']
+                    }
+                    for insight in self.insights
+                ]
+            }
+
+            # Insert into Supabase
+            print("\n💾 Saving conversation to Supabase...")
+            result = self.supabase.table('conversations').insert(conversation_data).execute()
+            print(f"✅ Conversation saved to Supabase (ID: {result.data[0]['id']})")
+
+            # Extract and save customer profile
+            if self.customer_id:
+                print("\n🧠 Extracting customer profile with Gemini...")
+                profile = self.extract_customer_profile(full_transcript)
+
+                if profile:
+                    print(f"\n📋 Extracted Profile:")
+                    print(f"   Name: {profile.get('name') or 'Not mentioned'}")
+                    print(f"   Personal: {len(profile.get('personal_details', []))} details")
+                    print(f"   Professional: {len(profile.get('professional_details', []))} details")
+                    print(f"   Sales Context: {len(profile.get('sales_context', []))} details")
+
+                    print("\n💾 Saving customer profile...")
+                    self.save_customer_profile(profile)
+
+        except Exception as e:
+            print(f"❌ Error saving to Supabase: {e}")
+
 
 def main():
     """
@@ -394,7 +612,9 @@ def main():
     """
     # Get API key from .env file or environment
     api_key = os.getenv("GEMINI_API_KEY")
-    
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
+
     if not api_key:
         print("⚠️  GEMINI_API_KEY not found")
         print("\nTo set it up:")
@@ -405,11 +625,11 @@ def main():
         print("   GEMINI_API_KEY=your-api-key-here")
         print("\nOr enter it now (or press Enter to skip Gemini integration):")
         api_key = input("API Key: ").strip()
-        
+
         if not api_key:
             print("\n⚠️  Running in TRANSCRIPTION-ONLY mode (no AI insights)")
             print("Transcripts will be shown but not analyzed.\n")
-            
+
             # Run without Gemini
             transcriber = LocalVoiceTranscriber(model_size="base")
             try:
@@ -421,13 +641,15 @@ def main():
             finally:
                 transcriber.stop()
             return
-    
+
     # Create analyzer with Gemini integration
     analyzer = SalesCallAnalyzer(
         gemini_api_key=api_key,
         model_size="base",  # Change to "tiny" for faster, "small" for more accurate
         camera_index=0,  # Change camera index if needed
-        enable_facial=True  # Set to False to disable facial sentiment
+        enable_facial=True,  # Set to False to disable facial sentiment
+        supabase_url=supabase_url,
+        supabase_key=supabase_key
     )
     
     try:

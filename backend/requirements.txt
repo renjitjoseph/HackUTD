@@ -17,3 +17,6 @@ pyttsx3==2.90
 # Facial sentiment analysis dependencies
 fer==22.5.1
 keras==2.15.0
+
+# Supabase client
+supabase==2.4.0

@@ -195,6 +195,22 @@ function App() {
             </div>
           </div>
         </div>
+        
+        <div className="video-section">
+          <div className="video-container">
+            <img 
+              src={`${API_URL}/emotion_feed`} 
+              alt="Emotion Detection Feed" 
+              className="video-feed"
+            />
+            <div className="video-overlay">
+              <div className="live-indicator emotion-indicator">
+                <span className="pulse"></span>
+                EMOTION
+              </div>
+            </div>
+          </div>
+        </div>
       </main>
       
       <div className="right-side-container">

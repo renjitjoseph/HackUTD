@@ -66,7 +66,7 @@
   padding-left: 2rem;
   display: flex;
   justify-content: flex-start;
-  gap: 2rem;
+  gap: 1.5rem;
 }
 
 .video-section {
@@ -76,21 +76,25 @@
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
-  width: 1200px;
+  width: auto;
 }
 
 .video-container {
   position: relative;
-  background: white;
+  background: transparent;
   border-radius: 16px;
   overflow: hidden;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  width: 506px;
+  height: 900px;
+  max-height: calc(100vh - 180px);
 }
 
 .video-feed {
   width: 100%;
-  height: auto;
+  height: 100%;
   display: block;
+  object-fit: cover;
 }
 
 .video-overlay {
@@ -111,6 +115,10 @@
   border-radius: 20px;
   font-weight: 700;
   font-size: 0.9rem;
+}
+
+.emotion-indicator {
+  background: rgba(102, 126, 234, 0.9);
 }
 
 .pulse {

@@ -14,6 +14,7 @@ import re
 import speech_recognition as sr
 import threading
 from queue import Queue
+from fer.fer import FER
 
 app = Flask(__name__)
 CORS(app)
@@ -39,10 +40,23 @@ class FaceRecognitionAPI:
         
         # Video capture
         self.cap = None
+        self.cap_emotion = None  # Separate capture for emotion detection
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         self.last_recognition = {}
         self.frame_count = 0
         self.process_every_n_frames = 15
+        
+        # Emotion detection
+        self.emotion_detector = FER(mtcnn=False)
+        self.emotion_colors = {
+            'happy': (0, 255, 0),
+            'sad': (255, 0, 0),
+            'angry': (0, 0, 255),
+            'neutral': (255, 255, 0),
+            'surprise': (0, 255, 255),
+            'fear': (128, 0, 128),
+            'disgust': (0, 165, 255)
+        }
         
         # Speech recognition
         self.recognizer = sr.Recognizer()
@@ -221,6 +235,9 @@ class FaceRecognitionAPI:
         if not ret:
             return None
         
+        # Rotate frame 90 degrees counter-clockwise
+        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        
         self.frame_count += 1
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -268,10 +285,64 @@ class FaceRecognitionAPI:
         
         return frame
     
+    def get_emotion_frame(self):
+        """Get a frame from the webcam with emotion detection"""
+        if self.cap_emotion is None or not self.cap_emotion.isOpened():
+            self.cap_emotion = cv2.VideoCapture(0)
+        
+        ret, frame = self.cap_emotion.read()
+        if not ret:
+            return None
+        
+        # Rotate frame 90 degrees counter-clockwise
+        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        
+        try:
+            # Detect emotions
+            result = self.emotion_detector.detect_emotions(frame)
+            
+            # Boost happy emotion score
+            if result:
+                for face_data in result:
+                    emotions = face_data['emotions']
+                    if 'happy' in emotions:
+                        emotions['happy'] *= 1.5
+                        total = sum(emotions.values())
+                        for emotion in emotions:
+                            emotions[emotion] /= total
+            
+            # Draw results
+            for face_data in result:
+                box = face_data['box']
+                x, y, w, h = box
+                emotions = face_data['emotions']
+                
+                # Get dominant emotion
+                dominant_emotion = max(emotions.items(), key=lambda x: x[1])
+                emotion_name = dominant_emotion[0]
+                confidence = dominant_emotion[1]
+                
+                # Draw bounding box
+                color = self.emotion_colors.get(emotion_name, (255, 255, 255))
+                cv2.rectangle(frame, (x, y), (x + w, y + h), color, 3)
+                
+                # Draw emotion label
+                label = f"{emotion_name}: {confidence:.1%}"
+                (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                cv2.rectangle(frame, (x, y - text_height - 10), (x + text_width + 10, y), color, -1)
+                cv2.putText(frame, label, (x + 5, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        
+        except Exception as e:
+            print(f"Error in emotion detection: {e}")
+        
+        return frame
+    
     def release_camera(self):
         """Release the camera"""
         if self.cap is not None:
             self.cap.release()
+        if self.cap_emotion is not None:
+            self.cap_emotion.release()
     
     def parse_name_from_speech(self, text):
         """Extract names from speech and update database"""
@@ -381,10 +452,29 @@ def generate_frames():
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
+def generate_emotion_frames():
+    """Generate frames for emotion video streaming"""
+    while True:
+        frame = face_system.get_emotion_frame()
+        if frame is None:
+            continue
+        
+        ret, buffer = cv2.imencode('.jpg', frame)
+        frame = buffer.tobytes()
+        
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
 @app.route('/video_feed')
 def video_feed():
     """Video streaming route"""
     return Response(generate_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/emotion_feed')
+def emotion_feed():
+    """Emotion video streaming route"""
+    return Response(generate_emotion_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/api/faces', methods=['GET'])

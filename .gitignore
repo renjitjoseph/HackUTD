@@ -35,3 +35,9 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Generated call data
+backend/call_*.txt
+
+# Facial sentiment screenshots
+screenshots/

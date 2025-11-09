@@ -20,7 +20,7 @@ from collections import Counter
 import numpy as np
 
 try:
-    from fer import FER
+    from fer.fer import FER
 except ImportError:
     print("ERROR: FER library not found. Please install it using:")
     print("pip install fer")

@@ -4,7 +4,7 @@ Detects faces and analyzes emotions in real-time
 """
 
 import cv2
-from fer import FER
+from fer.fer import FER
 import numpy as np
 
 

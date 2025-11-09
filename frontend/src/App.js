@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { Camera, Users, Edit2, Trash2, Check, X, RefreshCw } from 'lucide-react';
+import { Camera, Users, Edit2, Trash2, Check, X, RefreshCw, Mic, MicOff } from 'lucide-react';
 import './App.css';
 
 function App() {
@@ -9,17 +9,70 @@ function App() {
   const [editingId, setEditingId] = useState(null);
   const [newName, setNewName] = useState('');
   const [loading, setLoading] = useState(false);
+  const [transcriptions, setTranscriptions] = useState([]);
+  const [isListening, setIsListening] = useState(false);
+  const eventSourceRef = useRef(null);
 
   const API_URL = 'http://localhost:5001';
+
+  const startListening = async () => {
+    try {
+      await axios.post(`${API_URL}/api/speech/start`);
+      setIsListening(true);
+      
+      // Connect to SSE stream
+      eventSourceRef.current = new EventSource(`${API_URL}/api/speech/stream`);
+      
+      eventSourceRef.current.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.text) {
+          setTranscriptions(prev => [
+            { text: data.text, timestamp: data.timestamp },
+            ...prev.slice(0, 9) // Keep last 10 transcriptions
+          ]);
+        }
+      };
+      
+      eventSourceRef.current.onerror = (error) => {
+        console.error('SSE Error:', error);
+      };
+    } catch (error) {
+      console.error('Error starting speech recognition:', error);
+    }
+  };
+
+  const stopListening = async () => {
+    try {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+      await axios.post(`${API_URL}/api/speech/stop`);
+      setIsListening(false);
+    } catch (error) {
+      console.error('Error stopping speech recognition:', error);
+    }
+  };
 
   useEffect(() => {
     fetchFaces();
     fetchStats();
+    
+    // Auto-start speech recognition after a short delay
+    const startTimer = setTimeout(() => {
+      startListening();
+    }, 1000);
+    
     const interval = setInterval(() => {
       fetchFaces();
       fetchStats();
     }, 3000);
-    return () => clearInterval(interval);
+    
+    return () => {
+      clearTimeout(startTimer);
+      clearInterval(interval);
+      stopListening();
+    };
   }, []);
 
   const fetchFaces = async () => {
@@ -100,6 +153,7 @@ function App() {
     setNewName('');
   };
 
+
   return (
     <div className="App">
       <header className="header">
@@ -133,6 +187,39 @@ function App() {
                 <span className="pulse"></span>
                 LIVE
               </div>
+            </div>
+          </div>
+          
+          <div className="transcription-section">
+            <div className="transcription-header">
+              <h3>Live Transcription</h3>
+              <div className={`mic-status ${isListening ? 'active' : ''}`}>
+                <Mic size={20} />
+                <span>{isListening ? 'Listening...' : 'Starting...'}</span>
+              </div>
+            </div>
+            <div className="transcription-content">
+              {transcriptions.length === 0 ? (
+                <div className="transcription-empty">
+                  <Mic size={32} />
+                  <p>{isListening ? 'Listening... Speak now!' : 'Click Start to begin transcription'}</p>
+                </div>
+              ) : (
+                <>
+                  <div className="current-caption">
+                    <div className="caption-text">{transcriptions[0].text}</div>
+                  </div>
+                  {transcriptions.length > 1 && (
+                    <div className="previous-captions">
+                      {transcriptions.slice(1).map((item, index) => (
+                        <div key={index} className="previous-caption">
+                          {item.text}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </div>
         </div>

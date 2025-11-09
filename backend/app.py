@@ -11,6 +11,9 @@ import time
 import random
 import string
 import re
+import speech_recognition as sr
+import threading
+from queue import Queue
 
 app = Flask(__name__)
 CORS(app)
@@ -38,6 +41,15 @@ class FaceRecognitionAPI:
         self.last_recognition = {}
         self.frame_count = 0
         self.process_every_n_frames = 15
+        
+        # Speech recognition
+        self.recognizer = sr.Recognizer()
+        self.recognizer.energy_threshold = 300
+        self.recognizer.dynamic_energy_threshold = True
+        self.microphone = sr.Microphone(device_index=None)
+        self.listening = False
+        self.transcription_queue = Queue()
+        self.speech_thread = None
     
     def load_encodings(self):
         """Load pre-computed face encodings from file"""
@@ -208,6 +220,98 @@ class FaceRecognitionAPI:
         """Release the camera"""
         if self.cap is not None:
             self.cap.release()
+    
+    def parse_name_from_speech(self, text):
+        """Extract names from speech and update database"""
+        print(f"[NAME PARSE] Analyzing: '{text}'")
+        
+        # Patterns to detect name mentions
+        patterns = [
+            r"(?:this is|that's|thats|meet) ([a-z]+)",
+            r"(?:his name is|her name is|their name is|name is) ([a-z]+)",
+            r"(?:he's|she's|he is|she is) ([a-z]+)",
+            r"(?:call (?:him|her|them)) ([a-z]+)",
+        ]
+        
+        detected_name = None
+        matched_pattern = None
+        text_lower = text.lower()
+        
+        for i, pattern in enumerate(patterns):
+            match = re.search(pattern, text_lower)
+            if match:
+                detected_name = match.group(1).capitalize()
+                matched_pattern = i + 1
+                break
+        
+        if detected_name:
+            print(f"[NAME DETECTED]: {detected_name} (matched pattern #{matched_pattern})")
+            
+            # Find the most recent Person_XXX to rename
+            person_names = [name for name in self.known_faces.keys() if name.startswith("Person_")]
+            
+            if person_names:
+                # Get the most recently added Person_XXX
+                most_recent = person_names[-1]
+                print(f"[ACTION] Renaming {most_recent} to {detected_name}...")
+                success, message = self.update_person_name(most_recent, detected_name)
+                if success:
+                    print(f"[SUCCESS] {message}")
+                else:
+                    print(f"[ERROR] {message}")
+            else:
+                print(f"[INFO] No 'Person_XXX' names found to rename. Current names: {list(self.known_faces.keys())}")
+        else:
+            print(f"[NAME PARSE] No name pattern matched")
+    
+    def listen_for_speech(self):
+        """Continuously listen for speech and transcribe"""
+        print("[SPEECH] Starting speech recognition...")
+        try:
+            with self.microphone as source:
+                print("[SPEECH] Adjusting for ambient noise...")
+                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+                print(f"[SPEECH] Ready! Energy threshold: {self.recognizer.energy_threshold}")
+        except Exception as e:
+            print(f"[SPEECH ERROR] Could not initialize microphone: {e}")
+            self.transcription_queue.put({"error": str(e)})
+            return
+        
+        while self.listening:
+            try:
+                with self.microphone as source:
+                    audio = self.recognizer.listen(source, timeout=None, phrase_time_limit=10)
+                    print("[SPEECH] Audio detected, processing...")
+                
+                try:
+                    text = self.recognizer.recognize_google(audio)
+                    print(f"[SPEECH] Transcribed: {text}")
+                    self.transcription_queue.put({"text": text, "timestamp": time.time()})
+                    
+                    # Parse for name mentions and auto-rename faces
+                    self.parse_name_from_speech(text)
+                    
+                except sr.UnknownValueError:
+                    print("[SPEECH] Could not understand audio")
+                except sr.RequestError as e:
+                    print(f"[SPEECH ERROR] Recognition error: {e}")
+                    self.transcription_queue.put({"error": str(e)})
+            except Exception as e:
+                if self.listening:
+                    print(f"[SPEECH ERROR] Listening error: {e}")
+    
+    def start_speech_recognition(self):
+        """Start speech recognition in background thread"""
+        if not self.listening:
+            self.listening = True
+            self.speech_thread = threading.Thread(target=self.listen_for_speech, daemon=True)
+            self.speech_thread.start()
+            print("[SPEECH] Speech recognition started")
+    
+    def stop_speech_recognition(self):
+        """Stop speech recognition"""
+        self.listening = False
+        print("[SPEECH] Speech recognition stopped")
 
 # Initialize the face recognition system
 face_system = FaceRecognitionAPI()
@@ -316,8 +420,33 @@ def get_stats():
         'threshold': face_system.recognition_threshold
     })
 
+@app.route('/api/speech/start', methods=['POST'])
+def start_speech():
+    """Start speech recognition"""
+    face_system.start_speech_recognition()
+    return jsonify({'success': True, 'message': 'Speech recognition started'})
+
+@app.route('/api/speech/stop', methods=['POST'])
+def stop_speech():
+    """Stop speech recognition"""
+    face_system.stop_speech_recognition()
+    return jsonify({'success': True, 'message': 'Speech recognition stopped'})
+
+@app.route('/api/speech/stream')
+def speech_stream():
+    """Stream transcribed text using Server-Sent Events"""
+    def generate():
+        while True:
+            if not face_system.transcription_queue.empty():
+                data = face_system.transcription_queue.get()
+                yield f"data: {json.dumps(data)}\\n\\n"
+            time.sleep(0.1)
+    
+    return Response(generate(), mimetype='text/event-stream')
+
 if __name__ == '__main__':
     try:
         app.run(debug=True, host='0.0.0.0', port=5001, threaded=True)
     finally:
+        face_system.stop_speech_recognition()
         face_system.release_camera()

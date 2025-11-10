@@ -68,23 +68,10 @@ class SalesCallAnalyzer:
         if customer_id:
             print(f"👤 Customer ID set: {customer_id}")
 
-        # Face detection stability tracking
-        self.face_detection_enabled = True
-        self.locked_customer_id = customer_id  # The confirmed customer for this call
-        self.currently_detected_face = None  # What we're seeing right now
-        self.detection_start_time = None  # When we first saw this new face
-        self.stable_detection_duration = 5.0  # 5 seconds required to change customer
-        self.face_detection_thread = None
-        self.face_detection_running = False
-
-        # Face recognition setup (matching main.py logic)
-        self.known_faces = {}
-        self.face_model_name = "Facenet"
-        self.recognition_threshold = 8.0  # Confident match threshold
-        self.uncertain_threshold = 12.0  # Don't re-register between 8.0-12.0
-        self.new_face_cooldown = {}  # Prevent rapid re-registration
-        self.cooldown_duration = 3  # seconds
-        self.load_face_encodings()
+        # Customer ID tracking from main.py (via Supabase active_session)
+        self.customer_id_polling_thread = None
+        self.polling_active = False
+        self.last_synced_customer_id = None
 
         # Initialize TTS engine
         self.tts_engine = pyttsx3.init()
@@ -127,7 +114,8 @@ class SalesCallAnalyzer:
         
         # Start keyboard listener thread
         self.listening = True
-        self.keyboard_thread = threading.Thread(target=self._listen_for_enter)
+        self.call_active = True  # Flag to control call duration
+        self.keyboard_thread = threading.Thread(target=self._listen_for_keyboard)
         self.keyboard_thread.daemon = True
         self.keyboard_thread.start()
         
@@ -168,7 +156,9 @@ class SalesCallAnalyzer:
             if self.facial_enabled and self.facial_analyzer:
                 emotion_data = self.facial_analyzer.get_emotion_summary(duration_seconds=10)
 
+            print("🔄 Calling Gemini API...")
             insights = self._get_sales_insights(full_context, emotion_data)
+            print("✅ Gemini response received!")
 
             # Store insights with emotion data
             self.insights.append({
@@ -181,6 +171,8 @@ class SalesCallAnalyzer:
 
             # Display insights (compact)
             print("\n" + "⚡"*35)
+            print("📊 GEMINI INSIGHTS:")
+            print("⚡"*35)
             print(insights)
             print("⚡"*35 + "\n")
 
@@ -192,6 +184,8 @@ class SalesCallAnalyzer:
 
         except Exception as e:
             print(f"❌ Error getting insights: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _save_insights_to_active_session(self, insights: str):
         """
@@ -281,23 +275,32 @@ class SalesCallAnalyzer:
         except Exception as e:
             print(f"⚠️  TTS error: {e}")
     
-    def _listen_for_enter(self):
+    def _listen_for_keyboard(self):
         """
-        Listen for Enter key press to speak the latest recommendation.
+        Listen for keyboard input:
+        - Enter: Speak the latest recommendation
+        - 'q' + Enter: End the call gracefully
         """
         import sys
         while self.listening:
             try:
-                # Wait for Enter key
-                input()  # This blocks until Enter is pressed
+                # Wait for input
+                user_input = input()
                 
-                # Speak the latest recommendation
-                if self.latest_recommendation and self.latest_recommendation != "No recommendation yet":
-                    print(f"\n💬 Speaking recommendation: {self.latest_recommendation}\n")
-                    self.tts_engine.say(self.latest_recommendation)
-                    self.tts_engine.runAndWait()
-                else:
-                    print("\n⚠️  No recommendation available yet. Wait for first analysis.\n")
+                # Check for 'q' to quit
+                if user_input.strip().lower() == 'q':
+                    print("\n🛑 'q' pressed - Ending call gracefully...\n")
+                    self.call_active = False
+                    break
+                
+                # Empty input (Enter) - speak recommendation
+                if user_input.strip() == "":
+                    if self.latest_recommendation and self.latest_recommendation != "No recommendation yet":
+                        print(f"\n💬 Speaking recommendation: {self.latest_recommendation}\n")
+                        self.tts_engine.say(self.latest_recommendation)
+                        self.tts_engine.runAndWait()
+                    else:
+                        print("\n⚠️  No recommendation available yet. Wait for first analysis.\n")
                     
             except:
                 break
@@ -387,310 +390,38 @@ Keep it brief and actionable."""
         except Exception as e:
             print(f"❌ Error updating active session: {e}")
 
-    def load_face_encodings(self):
-        """Load face encodings for recognition"""
-        encodings_file = "face_encodings.pkl"
-        if os.path.exists(encodings_file):
+    def sync_customer_from_active_session(self):
+        """
+        Periodically poll active_session table to get current customer_id from main.py.
+        Runs in a background thread.
+        """
+        print("🔄 Starting customer_id sync from active_session...")
+        
+        while self.polling_active:
             try:
-                import pickle
-                with open(encodings_file, 'rb') as f:
-                    self.known_faces = pickle.load(f)
-                print(f"✅ Loaded {len(self.known_faces)} known faces for detection")
-            except Exception as e:
-                print(f"⚠️  Could not load face encodings: {e}")
-        else:
-            # No encodings file - create empty one, will auto-register first face
-            print("⚠️  No face_encodings.pkl found - will auto-register new faces")
-            self.known_faces = {}
-            # Don't disable face detection - we'll register the first face we see
-
-    def recognize_face(self, face_img):
-        """
-        Highly accurate face recognition using DeepFace - matches main.py logic.
-
-        Strategy (from main.py):
-        1. Use Facenet model with enforce_detection=False for robustness
-        2. Two-tier threshold system:
-           - < 8.0: Confident match (same person)
-           - 8.0-12.0: Uncertain (likely same, don't re-register)
-           - > 12.0: Different person (register as new)
-        3. Cooldown system: Prevent rapid re-registration (3 seconds)
-        """
-        try:
-            from deepface import DeepFace
-            import numpy as np
-
-            # Validate input image
-            if face_img is None or face_img.size == 0:
-                return None
-
-            # Get embedding (use enforce_detection=False like main.py for robustness)
-            try:
-                result = DeepFace.represent(
-                    face_img,
-                    model_name=self.face_model_name,
-                    enforce_detection=False  # More forgiving like main.py
-                )
-                embedding = result[0]["embedding"]
-            except Exception as e:
-                print(f"   ⚠️  Could not generate embedding: {e}")
-                return None
-
-            # Find closest match
-            min_distance = float('inf')
-            recognized_name = None
-
-            for name, known_embedding in self.known_faces.items():
-                distance = np.linalg.norm(np.array(embedding) - np.array(known_embedding))
-                if distance < min_distance:
-                    min_distance = distance
-                    recognized_name = name
-
-            # Two-tier threshold system (matching main.py)
-            if min_distance < self.uncertain_threshold and recognized_name:
-                # Within uncertain threshold (< 12.0)
-                if min_distance < self.recognition_threshold:
-                    # HIGH CONFIDENCE (< 8.0) - Definite match
-                    print(f"   ✓ Recognized: {recognized_name} (distance: {min_distance:.2f})")
-                    return recognized_name
-                else:
-                    # MEDIUM CONFIDENCE (8.0-12.0) - Likely same person, don't re-register
-                    print(f"   ✓ Recognized: {recognized_name} (?) (distance: {min_distance:.2f})")
-                    return recognized_name
-            else:
-                # UNKNOWN (> 12.0) - Check cooldown before registering
-                current_time = time.time()
-
-                # Use a unique face_id for cooldown tracking
-                face_id = f"face_{int(current_time * 1000)}"
-
-                # Check cooldown to prevent rapid re-registration
-                if face_id in self.new_face_cooldown:
-                    last_capture_time = self.new_face_cooldown[face_id]
-                    if current_time - last_capture_time < self.cooldown_duration:
-                        print(f"   ⏳ Processing... (distance: {min_distance:.2f})")
-                        return None
-
-                # Register new face (pass face_img first, then embedding like main.py)
-                print(f"   🆕 New person detected (distance: {min_distance:.2f}, threshold: {self.uncertain_threshold})")
-                new_customer_id = self.register_new_face(face_img, embedding)
-
-                if new_customer_id:
-                    # Update cooldown
-                    self.new_face_cooldown[face_id] = current_time
-
-                return new_customer_id
-
-        except Exception as e:
-            print(f"   ❌ Recognition error: {e}")
-            return None
-
-    def register_new_face(self, face_img, embedding=None):
-        """
-        Auto-register a new unknown face - matches main.py exactly.
-
-        Args:
-            face_img: Face image to register
-            embedding: Pre-computed embedding (optional, will compute if None)
-
-        Returns:
-            customer_id: Generated ID like "Person_ABC123"
-        """
-        import random
-        import string
-        import pickle
-        import cv2
-        from deepface import DeepFace
-
-        try:
-            # Generate unique customer ID (matches main.py logic)
-            random_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-            customer_id = f"Person_{random_id}"
-
-            # Make sure it's unique
-            while customer_id in self.known_faces:
-                random_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-                customer_id = f"Person_{random_id}"
-
-            print(f"\n[NEW FACE DETECTED] Registering as: {customer_id}")
-
-            # Get embedding if not provided (matches main.py)
-            if embedding is None:
-                embedding = DeepFace.represent(
-                    face_img,
-                    model_name=self.face_model_name,
-                    enforce_detection=False
-                )[0]["embedding"]
-
-            # Save to database (matches main.py)
-            self.known_faces[customer_id] = embedding
-
-            # Save encodings to file
-            encodings_file = "face_encodings.pkl"
-            with open(encodings_file, 'wb') as f:
-                pickle.dump(self.known_faces, f)
-
-            # Save face image
-            database_path = "face_database"
-            if not os.path.exists(database_path):
-                os.makedirs(database_path)
-
-            img_path = os.path.join(database_path, f"{customer_id}.jpg")
-            cv2.imwrite(img_path, face_img)
-
-            print(f"✓ Successfully registered {customer_id}")
-            print(f"  Total faces in database: {len(self.known_faces)}")
-
-            return customer_id
-
-        except Exception as e:
-            print(f"Error registering new face: {e}")
-            return None
-
-    def face_detection_loop(self):
-        """Continuous face detection loop with GUI in main thread"""
-        import cv2
-
-        # MUST open new camera - cannot share with facial analyzer for GUI
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            print("❌ Could not open webcam for face detection")
-            return
-
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        frame_count = 0
-        last_detected_id = None  # Track last detected ID to reduce spam
-        last_print_time = time.time()  # For periodic status updates
-
-        print("👁️  Face detection monitoring started")
-        print("📺 Camera window opened - Press 'q' to close")
-
-        while self.face_detection_running:
-            ret, frame = cap.read()
-            if not ret:
-                continue
-
-            frame_count += 1
-            display_frame = frame.copy()
-            current_time = time.time()
-
-            # Process every 10 frames (~3 fps for more responsive detection)
-            if frame_count % 10 == 0:
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
-
-                if len(faces) > 0:
-                    # Extract first face
-                    x, y, w, h = faces[0]
-
-                    # Draw rectangle around face
-                    cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-
-                    padding = 20
-                    y1 = max(0, y - padding)
-                    y2 = min(frame.shape[0], y + h + padding)
-                    x1 = max(0, x - padding)
-                    x2 = min(frame.shape[1], x + w + padding)
-                    face_img = frame[y1:y2, x1:x2]
-
-                    # Recognize face
-                    detected_id = self.recognize_face(face_img)
-
-                    if detected_id:
-                        # Only print if ID changed
-                        if detected_id != last_detected_id:
-                            self.process_detected_face(detected_id)
-                            last_detected_id = detected_id
-                        else:
-                            # Silently process without printing
-                            self.process_detected_face(detected_id)
-
-                        # Display name on frame
-                        status = f"{detected_id}"
-                        if self.locked_customer_id:
-                            status = f"LOCKED: {self.locked_customer_id}"
-                        cv2.putText(display_frame, status, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    else:
-                        if last_detected_id is not None:
-                            print(f"⚠️  Face detected but recognition failed")
-                            last_detected_id = None
-                else:
-                    # No face in frame
-                    if self.currently_detected_face is not None:
-                        print(f"👤 Current: {self.locked_customer_id or 'None'} | Detected: [No face in frame]")
-                        self.currently_detected_face = None
-                        self.detection_start_time = None
-                        last_detected_id = None
-
-            # Print status updates to console instead of GUI (GUI doesn't work in thread on macOS)
-            if self.locked_customer_id and frame_count % 150 == 0:  # Every ~5 seconds
-                print(f"📹 Face Detection Active | Customer: {self.locked_customer_id} | Status: LOCKED")
-            elif self.currently_detected_face and frame_count % 30 == 0:  # Every second during verification
-                elapsed = current_time - self.detection_start_time
-                remaining = max(0, self.stable_detection_duration - elapsed)
-                print(f"📹 Verifying customer... {remaining:.1f}s remaining")
-
-            time.sleep(0.05)  # ~20fps processing
-
-        cap.release()
-        cv2.destroyAllWindows()
-        print("✅ Face detection stopped")
-
-    def process_detected_face(self, detected_id):
-        """Process a detected face with 5-second stability check"""
-        current_time = time.time()
-
-        # Print status
-        print(f"👤 Current: {self.locked_customer_id or 'None'} | Detected: {detected_id}")
-
-        # If this is a different face than what we're currently tracking
-        if detected_id != self.currently_detected_face:
-            # Start tracking this new face
-            self.currently_detected_face = detected_id
-            self.detection_start_time = current_time
-            print(f"   🔍 New face detected, tracking for 5 seconds...")
-
-            # Update active_session to "detecting"
-            if self.supabase:
-                try:
-                    self.supabase.table('active_session').update({
-                        'confidence_level': 'detecting'
-                    }).eq('id', 1).execute()
-                except:
-                    pass
-
-            return
-
-        # Same face as we're tracking - check if it's been 5 seconds
-        time_elapsed = current_time - self.detection_start_time
-
-        # Lock customer if:
-        # 1. It's been 5 seconds AND
-        # 2. Either no customer locked yet OR detected face is different from locked customer
-        if time_elapsed >= self.stable_detection_duration:
-            if self.locked_customer_id is None or detected_id != self.locked_customer_id:
-                # Check if this is first lock or a change
-                is_first_lock = (self.locked_customer_id is None)
-
-                # Lock in the new customer
-                self.locked_customer_id = detected_id
-                self.customer_id = detected_id
-
-                if is_first_lock:
-                    print(f"   ✅ CUSTOMER LOCKED: {detected_id} (stable for {time_elapsed:.1f}s)")
-                else:
-                    print(f"   ✅ CUSTOMER CHANGED: {detected_id} (stable for {time_elapsed:.1f}s)")
-
-                # Update active_session
                 if self.supabase:
-                    try:
-                        self.supabase.table('active_session').update({
-                            'current_customer_id': detected_id,
-                            'confidence_level': 'stable'
-                        }).eq('id', 1).execute()
-                        print(f"   ✅ Updated active_session with customer: {detected_id}")
-                    except Exception as e:
-                        print(f"   ❌ Error updating active session: {e}")
+                    # Query active_session for current customer
+                    result = self.supabase.table('active_session').select('current_customer_id').eq('id', 1).single().execute()
+                    
+                    if result.data:
+                        new_customer_id = result.data.get('current_customer_id')
+                        
+                        # Update customer_id if changed
+                        if new_customer_id != self.last_synced_customer_id:
+                            self.last_synced_customer_id = new_customer_id
+                            self.customer_id = new_customer_id
+                            
+                            if new_customer_id:
+                                print(f"👤 Customer detected by main.py: {new_customer_id}")
+                            else:
+                                print(f"👤 No customer currently detected")
+                
+            except Exception as e:
+                # Silently handle errors (don't spam console)
+                pass
+            
+            # Poll every 2 seconds
+            time.sleep(2)
 
     def start(self):
         """Start the sales call analysis."""
@@ -704,20 +435,28 @@ Keep it brief and actionable."""
         print("🔊 TTS enabled - Status reports spoken out loud!")
         if self.facial_enabled:
             print("🎥 Facial sentiment analysis ACTIVE")
-        print("⌨️  Press ENTER anytime to hear latest recommendation!")
-        print("Press Ctrl+C to stop\n")
+        print("👁️  Face detection managed by main.py")
+        print("🔄 Syncing customer_id from active_session table")
+        print("\n" + "⌨️"*35)
+        print("KEYBOARD CONTROLS:")
+        print("  • Press ENTER → Hear latest recommendation")
+        print("  • Type 'q' + ENTER → End call gracefully")
+        print("⌨️"*35 + "\n")
 
         # Mark session as active
         self.set_active_session('active')
 
-        # Start face detection in background thread (even if no faces registered yet)
-        if self.face_detection_enabled:
-            self.face_detection_running = True
-            # Use daemon=False so window stays open
-            self.face_detection_thread = threading.Thread(target=self.face_detection_loop, daemon=False)
-            self.face_detection_thread.start()
-            print("👁️  Face detection enabled - will auto-register new faces")
-            print("💡 TIP: Press 'q' in camera window to close it")
+        # Start customer_id polling thread (reads from active_session table)
+        if self.supabase:
+            self.polling_active = True
+            self.customer_id_polling_thread = threading.Thread(
+                target=self.sync_customer_from_active_session, 
+                daemon=True
+            )
+            self.customer_id_polling_thread.start()
+            print("✅ Customer ID sync thread started\n")
+        else:
+            print("⚠️  Supabase not configured - customer tracking disabled\n")
 
         self.transcriber.start()
         
@@ -726,11 +465,11 @@ Keep it brief and actionable."""
         self.listening = False
         self.transcriber.stop()
 
-        # Stop face detection thread
-        if self.face_detection_running:
-            self.face_detection_running = False
-            if self.face_detection_thread:
-                self.face_detection_thread.join(timeout=2)
+        # Stop customer_id polling thread
+        if self.polling_active:
+            self.polling_active = False
+            if self.customer_id_polling_thread:
+                self.customer_id_polling_thread.join(timeout=3)
 
         # Stop facial capture if enabled
         if self.facial_analyzer:
@@ -738,6 +477,13 @@ Keep it brief and actionable."""
 
         # Mark session as idle
         self.set_active_session('idle')
+
+        # Debug: Show customer detection status
+        if self.customer_id:
+            print(f"\n✅ Customer detected during call: {self.customer_id}")
+        else:
+            print(f"\n⚠️  WARNING: No customer_id detected during this call!")
+            print(f"   Make sure main.py is running and has locked a customer.")
 
         # Save conversation to Supabase if available
         if self.supabase and len(self.insights) > 0:
@@ -999,6 +745,12 @@ JSON OUTPUT:"""
             # Compile full transcript
             full_transcript = " ".join([i['transcript'] for i in self.insights])
 
+            # Debug: Check customer_id status
+            if self.customer_id:
+                print(f"💾 Saving conversation for customer: {self.customer_id}")
+            else:
+                print(f"⚠️  WARNING: No customer_id detected during this call! Conversation will be saved without customer link.")
+
             # Prepare conversation data
             conversation_data = {
                 "timestamp": datetime.now().isoformat(),
@@ -1092,16 +844,19 @@ def main():
         # Start analysis
         analyzer.start()
         
-        # Run for 60 seconds (or until interrupted)
-        print("📞 Simulating 60-second sales call...")
-        print("   (In production, this would run for the entire call)\n")
-        time.sleep(60)
+        # Run until 'q' is pressed or interrupted
+        print("📞 Call in progress...")
+        print("   Type 'q' + ENTER to end call and extract customer profile\n")
+        
+        # Wait until call_active flag is set to False (by pressing 'q')
+        while analyzer.call_active:
+            time.sleep(1)
         
     except KeyboardInterrupt:
-        print("\n\n⚠️  Stopped by user")
+        print("\n\n⚠️  Stopped by Ctrl+C")
         
     finally:
-        # Stop recording
+        # Stop recording - this triggers profile extraction
         analyzer.stop()
         
         # Just save the transcript and insights - NO post-call analysis

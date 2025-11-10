@@ -6,9 +6,6 @@ from deepface import DeepFace
 import time
 import random
 import string
-import speech_recognition as sr
-import threading
-import re
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -37,19 +34,12 @@ class UnifiedFaceSystem:
                 print(f"⚠️  Supabase initialization failed: {e}")
                 self.supabase = None
 
-        # Voice recognition setup
-        self.recognizer = sr.Recognizer()
-        self.recognizer.energy_threshold = 300  # Lower threshold for better detection
-        self.recognizer.dynamic_energy_threshold = True
-        # Try microphone index 2 (RJ Microphone) - change if needed
-        self.microphone = sr.Microphone(device_index=None)  # None = default, or try 0, 2, etc.
-        self.listening = False
-        self.last_heard_names = []  # Store recently detected names from conversation
-
         # Customer locking for active_session tracking
         self.locked_customer_id = None
         self.customer_lock_time = None
-        self.lock_duration = 5.0  # 5 seconds of stable detection before locking
+        self.lock_duration = 2.0  # 2 seconds of stable detection before locking
+        self.last_face_seen_time = None  # Track when we last saw any face
+        self.no_face_timeout = 10.0  # Unlock customer if no face for 10 seconds
 
         # Create database directory if it doesn't exist
         if not os.path.exists(database_path):
@@ -127,154 +117,6 @@ class UnifiedFaceSystem:
             print(f"Error registering new face: {e}")
             return None, None
     
-    def update_person_name(self, old_name, new_name):
-        """Update a person's name in the database"""
-        if old_name not in self.known_faces:
-            print(f"Error: {old_name} not found in database")
-            return False
-        
-        if new_name in self.known_faces:
-            print(f"Error: {new_name} already exists in database")
-            return False
-        
-        try:
-            # Update the encoding dictionary
-            self.known_faces[new_name] = self.known_faces.pop(old_name)
-            
-            # Save updated encodings
-            with open(self.encodings_file, 'wb') as f:
-                pickle.dump(self.known_faces, f)
-            
-            # Rename the image file
-            old_img_path = os.path.join(self.database_path, f"{old_name}.jpg")
-            new_img_path = os.path.join(self.database_path, f"{new_name}.jpg")
-            
-            if os.path.exists(old_img_path):
-                os.rename(old_img_path, new_img_path)
-            
-            print(f"\n✓ Successfully renamed {old_name} to {new_name}")
-            return True
-            
-        except Exception as e:
-            print(f"Error updating name: {e}")
-            return False
-    
-    def test_microphone(self):
-        """Test if microphone is working"""
-        print("\n[MIC TEST] Testing microphone for 3 seconds...")
-        print("[MIC TEST] Say something NOW!")
-        try:
-            with self.microphone as source:
-                audio = self.recognizer.listen(source, timeout=3, phrase_time_limit=3)
-                print("[MIC TEST] ✅ Audio detected! Microphone is working!")
-                try:
-                    text = self.recognizer.recognize_google(audio).lower()
-                    print(f"[MIC TEST] You said: \"{text}\"")
-                    return True
-                except:
-                    print("[MIC TEST] ⚠️ Heard audio but couldn't understand it")
-                    return True
-        except sr.WaitTimeoutError:
-            print("[MIC TEST] ❌ No audio detected - microphone may not be working!")
-            print("[MIC TEST] Check System Settings → Privacy & Security → Microphone")
-            print("[MIC TEST] Make sure Python/Terminal has microphone access!")
-            return False
-    
-    def listen_for_names(self):
-        """Continuously listen for name mentions in conversation"""
-        # List available microphones
-        print("\n[VOICE] Available microphones:")
-        for index, name in enumerate(sr.Microphone.list_microphone_names()):
-            print(f"  [{index}] {name}")
-        
-        # Test microphone first
-        if not self.test_microphone():
-            print("\n[VOICE] ⚠️ Microphone test failed - voice recognition may not work!")
-            print("[VOICE] Continuing anyway, but you may need to fix permissions...\n")
-        
-        try:
-            with self.microphone as source:
-                print("\n[VOICE] Adjusting for ambient noise... (stay quiet)")
-                self.recognizer.adjust_for_ambient_noise(source, duration=2)
-                print(f"[VOICE] Energy threshold set to: {self.recognizer.energy_threshold}")
-                print("[VOICE] Microphone ready! Speak clearly and at normal volume.")
-                print("[VOICE] System is ALWAYS listening - just speak naturally!")
-                print("[VOICE] EVERY WORD you say will be written in the terminal!\n")
-        except Exception as e:
-            print(f"[VOICE ERROR] Could not initialize microphone: {e}")
-            print("[VOICE ERROR] Check microphone permissions in System Settings!")
-            return
-        
-        listen_count = 0
-        while self.listening:
-            try:
-                with self.microphone as source:
-                    # Show we're actively listening
-                    listen_count += 1
-                    if listen_count % 10 == 1:
-                        print(f"[VOICE] 👂 Actively listening... (count: {listen_count})")
-                    
-                    # Continuously listen without timeout
-                    audio = self.recognizer.listen(source, timeout=None, phrase_time_limit=10)
-                    print("\n" + "="*60)
-                    print("[VOICE] 🎤 AUDIO DETECTED! Processing speech...")
-                    print("="*60)
-                
-                try:
-                    text = self.recognizer.recognize_google(audio).lower()
-                    print(f"[HEARD]: \"{text}\"")
-                    print(f"[INFO] Full text received: {text}")
-                    
-                    # Parse for name patterns
-                    self.parse_name_from_speech(text)
-                    
-                except sr.UnknownValueError:
-                    print("[VOICE] ❌ Could not understand - try speaking louder/clearer")
-                except sr.RequestError as e:
-                    print(f"[VOICE ERROR] ❌ Speech recognition error: {e}")
-                    print("[VOICE ERROR] Check your internet connection!")
-                    
-            except Exception as e:
-                if self.listening:
-                    print(f"\n[VOICE ERROR] Listening error: {e}")
-    
-    def parse_name_from_speech(self, text):
-        """Extract names from speech and update database"""
-        print(f"[DEBUG] Parsing text: '{text}'")
-        
-        # Patterns to detect name mentions
-        patterns = [
-            r"(?:this is|that's|thats|meet) ([a-z]+)",
-            r"(?:his name is|her name is|their name is|name is) ([a-z]+)",
-            r"(?:he's|she's|he is|she is) ([a-z]+)",
-            r"(?:call (?:him|her|them)) ([a-z]+)",
-        ]
-        
-        detected_name = None
-        matched_pattern = None
-        for i, pattern in enumerate(patterns):
-            match = re.search(pattern, text)
-            if match:
-                detected_name = match.group(1).capitalize()
-                matched_pattern = i + 1
-                break
-        
-        if detected_name:
-            print(f"[NAME DETECTED]: {detected_name} (matched pattern #{matched_pattern})")
-            self.last_heard_names.append(detected_name)
-            
-            # Find the most recent Person_XXX to rename
-            person_names = [name for name in self.known_faces.keys() if name.startswith("Person_")]
-            
-            if person_names:
-                # Get the most recently added Person_XXX
-                most_recent = person_names[-1]
-                print(f"[ACTION] Renaming {most_recent} to {detected_name}...")
-                self.update_person_name(most_recent, detected_name)
-            else:
-                print(f"[INFO] No 'Person_XXX' names found to rename. Current names: {list(self.known_faces.keys())}")
-        else:
-            print(f"[DEBUG] No name pattern matched in: '{text}'")
     
     def recognize_or_register_face(self, face_img, face_id):
         """Recognize a face or register it if unknown"""
@@ -369,20 +211,12 @@ class UnifiedFaceSystem:
         print("  • Recognize known faces and display their names")
         print("  • Automatically capture and register new faces")
         print("  • Assign random names to new faces")
-        print("  • Listen for names in conversation and update automatically")
         print("  • Update active_session for mobile app integration")
-        print("\nVoice Commands:")
-        print("  'This is [Name]' or 'His/Her name is [Name]'")
+        print("  • Gemini will extract names from conversations")
         print("\nPress 'q' to quit\n")
 
         # Mark session as active
         self.update_active_session(status='active')
-
-        # Start voice recognition in background thread
-        self.listening = True
-        voice_thread = threading.Thread(target=self.listen_for_names, daemon=True)
-        voice_thread.start()
-        print("🎤 Voice recognition active...\n")
         
         # Initialize webcam
         cap = cv2.VideoCapture(0)
@@ -455,19 +289,23 @@ class UnifiedFaceSystem:
                     # Store result
                     last_recognition[i] = (name, distance, is_new)
 
-                    # Track customer locking (5 seconds of stable detection)
+                    # Update last face seen time
+                    self.last_face_seen_time = time.time()
+
+                    # Track customer locking (2 seconds of stable detection)
                     clean_name = name.replace(" (?)", "")  # Remove uncertainty marker
                     if distance < 12.0:  # Within recognition range
-                        if self.locked_customer_id != clean_name:
-                            # New customer detected or customer changed
+                        if self.locked_customer_id is None:
+                            # No customer locked yet - start tracking
                             if self.customer_lock_time is None:
                                 self.customer_lock_time = time.time()
                             elif time.time() - self.customer_lock_time >= self.lock_duration:
-                                # Lock achieved after 5 seconds
+                                # Lock achieved after 2 seconds
                                 self.locked_customer_id = clean_name
                                 self.update_active_session(customer_id=clean_name, status='active')
                                 self.customer_lock_time = None
-                        # else: Already locked to this customer, do nothing
+                                print(f"\n🔒 Customer locked and will persist even if they move out of frame")
+                        # else: Already locked, keep the lock (persistent locking)
 
                     # Print to terminal
                     if is_new:
@@ -516,9 +354,8 @@ class UnifiedFaceSystem:
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 print("\n\nExiting...")
                 break
-        
+
         # Cleanup
-        self.listening = False  # Stop voice recognition
         self.update_active_session(status='idle')  # Clear active session
         cap.release()
         cv2.destroyAllWindows()
